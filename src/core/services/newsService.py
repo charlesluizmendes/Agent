@@ -1,4 +1,4 @@
-import requests
+import httpx
 import asyncio
 
 from langsmith import traceable
@@ -37,6 +37,7 @@ class NewsService(INewsService):
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
                     loop = None
+
                 if loop and loop.is_running():
                     return asyncio.ensure_future(coro)
                 else:
@@ -58,7 +59,7 @@ class NewsService(INewsService):
             agent = initialize_agent(                
                 llm=self.llm,
                 tools=tools,
-                agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+                agent_type=AgentType.OPENAI_FUNCTIONS,
                 handle_parsing_errors=True,
                 verbose=True,
             )
@@ -87,30 +88,47 @@ class NewsService(INewsService):
     @traceable(run_type="tool", name="search_news")
     async def _search_news(self, topic):
         """Busca notícias recentes sobre um tema (usando DuckDuckGo)."""
-        url = f"https://duckduckgo.com/html/?q={topic}+notícias+2025"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers)
-        if r.status_code != 200:
-            return "Falha ao buscar notícias."
+        try:
+            url = f"https://html.duckduckgo.com/html/?q={topic}+notícias+2025"
 
-        results = []
-        for line in r.text.split("<a "):
-            if "result__a" in line:
-                try:
-                    title = line.split(">")[1].split("<")[0]
-                    results.append(title)
-                except IndexError:
-                    continue
-            if len(results) >= 3:
-                break
-        return "\n".join(results)
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.get(url)
+            response.raise_for_status()
+
+            results = []
+            for line in response.text.split("<a "):
+                if "result__a" in line:
+                    try:
+                        title = line.split(">")[1].split("<")[0]
+                        results.append(title)
+                    except IndexError:
+                        continue
+                if len(results) >= 3:
+                    break
+
+            if not results:
+                return "Nenhuma notícia encontrada."
+
+            print(f"\n[DEBUG] Notícia encontrada: {results}")
+            return "\n".join(results)
+
+        except Exception as e:
+            print(f"\n[ERRO] _add_file_from_chatpdf: {e}")
+            raise
 
     @traceable(run_type="tool", name="summarize_news")
-    async def _summarize_news(self, news_text):
+    async def _summarize_news(self, text):
         """Gera um resumo breve das notícias."""
-        prompt = PromptTemplate.from_template(
-            "Resuma as seguintes manchetes em português, destacando o tema principal e o contexto geral:\n\n{news_text}"
-        )
-        chain = LLMChain(llm=self.llm, prompt=prompt)
-        summary = await chain.arun({"news_text": news_text})
-        return summary.strip()
+        try:
+            prompt = PromptTemplate.from_template(
+                "Resuma as seguintes manchetes em português, destacando o tema principal e o contexto geral:\n\n{text}"
+            )
+            chain = LLMChain(llm=self.llm, prompt=prompt)
+            summary = await chain.arun({"text": text})
+
+            print(f"\n[DEBUG] Resumo gerado: {summary}")
+            return summary.strip()
+
+        except Exception as e:
+            print(f"\n[ERRO] _summarize_news: {e}")
+            raise
